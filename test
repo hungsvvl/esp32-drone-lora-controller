@@ -1,157 +1,151 @@
 #include <SPI.h>
-#include <LoRa.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7735.h>
-#include <Wire.h>
-#include <Adafruit_BMP280.h>
+#include <TFT_eSPI.h> 
 
-// --- 1. CẤU HÌNH CHÂN (Rõ ràng từng chân một) ---
-// LORA
-#define LORA_SS    5
-#define LORA_RST   14
-#define LORA_DIO0  2
+TFT_eSPI tft = TFT_eSPI(); 
 
-// MÀN HÌNH TFT
-#define TFT_CS     15
-#define TFT_RST    4
-#define TFT_DC     16
+// --- CẤU HÌNH CHÂN (Giữ nguyên) ---
+#define PIN_LEFT_X  34   // Yaw
+#define PIN_LEFT_Y  35   // Throttle
+#define PIN_RIGHT_X 32   // Roll
+#define PIN_RIGHT_Y 33   // Pitch
 
-// JOYSTICK
-#define L_YAW      32
-#define L_THROTTLE 33
-#define R_ROLL     35
-#define R_PITCH    34
+// --- CẤU HÌNH TINH CHỈNH ---
+const int DEADZONE = 50;
+const int SAMPLE_COUNT = 10;
+int centerLX, centerLY, centerRX, centerRY;
 
-// --- 2. KHỞI TẠO ĐỐI TƯỢNG ---
-// Dùng thư viện Adafruit để kiểm soát chân tốt hơn
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
-Adafruit_BMP280 bmp;
+// --- BIẾN ĐỒ HỌA SÓNG ---
+#define MAX_WIDTH 160 // Chiều ngang tối đa của màn hình dọc (thường là 128 hoặc 160)
+int scanX = 0;        // Con trỏ quét ngang màn hình
 
-// Biến gửi dữ liệu
-struct Data_Package {
-  byte throttle;
-  byte yaw;
-  byte pitch;
-  byte roll;
-};
-Data_Package data;
+// Mảng lưu lịch sử giá trị Y để vẽ đường nối
+int historyLY[MAX_WIDTH]; // Throttle (Blue)
+int historyLX[MAX_WIDTH]; // Yaw (Cyan)
+int historyRY[MAX_WIDTH]; // Pitch (Green)
+int historyRX[MAX_WIDTH]; // Roll (Red)
+
+// Vị trí nền trục Y cho từng kênh trên màn hình
+int basePathLY, basePathLX, basePathRY, basePathRX;
+int screenW, screenH;
 
 void setup() {
   Serial.begin(115200);
 
-  // --- BƯỚC 1: XỬ LÝ CHÂN CS ĐỂ TRÁNH XUNG ĐỘT ---
-  pinMode(TFT_CS, OUTPUT);
-  digitalWrite(TFT_CS, HIGH); // Tắt màn hình
-  pinMode(LORA_SS, OUTPUT);
-  digitalWrite(LORA_SS, HIGH); // Tắt LoRa
+  // 1. KHỞI ĐỘNG MÀN HÌNH (SỬA XOAY CHIỀU TẠI ĐÂY)
+  tft.init();
+  // Nếu 0 bị ngược, thì 2 sẽ là xuôi. (Thử 0 hoặc 2)
+  tft.setRotation(2); 
+  tft.fillScreen(TFT_BLACK);
+  
+  screenW = tft.width();
+  screenH = tft.height();
 
-  // --- BƯỚC 2: KHỞI ĐỘNG LORA TRƯỚC ---
-  Serial.print("Khoi dong LoRa... ");
-  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
-  
-  if (!LoRa.begin(433E6)) {
-    Serial.println("LOI!");
-    // Nếu lỗi LoRa, ta vẫn cho chạy tiếp để hiển thị lỗi lên màn hình
-  } else {
-    Serial.println("OK!");
-    LoRa.setSpreadingFactor(7);
-    LoRa.setSignalBandwidth(250E3);
-  }
+  // Tính toán vị trí nền cho 4 kênh (chia màn hình làm 4 phần dọc)
+  int sectionH = screenH / 4;
+  basePathLY = sectionH / 2;          // Tầng 1 (Trên cùng)
+  basePathLX = sectionH + sectionH/2; // Tầng 2
+  basePathRY = sectionH*2 + sectionH/2; // Tầng 3
+  basePathRX = sectionH*3 + sectionH/2; // Tầng 4 (Dưới cùng)
 
-  // --- BƯỚC 3: KHỞI ĐỘNG MÀN HÌNH ---
-  // QUAN TRỌNG: Nếu màn hình trắng xóa, đổi BLACKTAB thành GREENTAB hoặc 144GREENTAB
-  tft.initR(INITR_BLACKTAB); 
-  // tft.initR(INITR_144GREENTAB); // Thử dòng này nếu bị trắng màn
+  // Vẽ các đường kẻ ngang phân chia khu vực và nhãn
+  tft.setTextColor(TFT_WHITE); tft.setTextSize(1);
+  tft.drawLine(0, sectionH, screenW, sectionH, TFT_DARKGREY);
+  tft.drawString("THR (Blue)", 2, 2);
   
-  tft.setRotation(1);
-  tft.fillScreen(ST77XX_BLACK);
-  
-  // Hiển thị trạng thái khởi động
-  tft.setCursor(0, 0);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.println("SYSTEM CHECK:");
-  
-  tft.print("LoRa: ");
-  // Kiểm tra lại LoRa lần nữa (mẹo check thanh ghi)
-  if (LoRa.begin(433E6)) { // Thử init lại nhẹ nhàng
-      tft.setTextColor(ST77XX_GREEN);
-      tft.println("OK");
-      LoRa.setSpreadingFactor(7); // Cài lại thông số sau khi init
-      LoRa.setSignalBandwidth(250E3);
-  } else {
-      tft.setTextColor(ST77XX_RED);
-      tft.println("ERROR");
-  }
+  tft.drawLine(0, sectionH*2, screenW, sectionH*2, TFT_DARKGREY);
+  tft.drawString("YAW (Cyan)", 2, sectionH + 2);
 
-  // --- BƯỚC 4: KHỞI ĐỘNG BMP280 ---
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print("Sensor: ");
-  if (!bmp.begin(0x76)) {
-    tft.setTextColor(ST77XX_RED);
-    tft.println("NO");
-  } else {
-    tft.setTextColor(ST77XX_GREEN);
-    tft.println("OK");
-    // Cấu hình sensor
-    bmp.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2, Adafruit_BMP280::SAMPLING_X16, Adafruit_BMP280::FILTER_X16, Adafruit_BMP280::STANDBY_MS_500);
+  tft.drawLine(0, sectionH*3, screenW, sectionH*3, TFT_DARKGREY);
+  tft.drawString("PIT (Green)", 2, sectionH*2 + 2);
+
+  tft.drawString("ROL (Red)", 2, sectionH*3 + 2);
+
+  // Cấu hình input
+  pinMode(PIN_LEFT_X, INPUT); pinMode(PIN_LEFT_Y, INPUT);
+  pinMode(PIN_RIGHT_X, INPUT); pinMode(PIN_RIGHT_Y, INPUT);
+
+  // Cân chỉnh (Auto Calibration)
+  tft.setCursor(screenW/4, screenH/2 - 10);
+  tft.print("Dang can chinh..."); delay(1000);
+
+  centerLX = readRawAverage(PIN_LEFT_X); centerLY = readRawAverage(PIN_LEFT_Y);
+  centerRX = readRawAverage(PIN_RIGHT_X); centerRY = readRawAverage(PIN_RIGHT_Y);
+
+  tft.fillRect(screenW/4, screenH/2 - 10, 100, 20, TFT_BLACK); // Xóa thông báo
+
+  // Khởi tạo mảng lịch sử để tránh lỗi vẽ lần đầu
+  for(int i=0; i<MAX_WIDTH; i++) {
+    historyLY[i] = basePathLY; historyLX[i] = basePathLX;
+    historyRY[i] = basePathRY; historyRX[i] = basePathRX;
   }
-  
-  delay(1000);
-  tft.fillScreen(ST77XX_BLACK); // Vào màn hình chính
-  
-  // Vẽ khung giao diện cố định
-  tft.drawRect(0, 0, 160, 128, ST77XX_BLUE);
-  tft.drawLine(0, 20, 160, 20, ST77XX_BLUE);
-  tft.setCursor(40, 6);
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.print("TX CONTROLLER");
 }
 
 void loop() {
-  // 1. ĐỌC JOYSTICK
-  int raw_Thro = map(analogRead(L_THROTTLE), 0, 4095, 1000, 2000);
-  int raw_Yaw  = map(analogRead(L_YAW),      0, 4095, 1000, 2000);
-  int raw_Pit  = map(analogRead(R_PITCH),    0, 4095, 1000, 2000);
-  int raw_Rol  = map(analogRead(R_ROLL),     0, 4095, 1000, 2000);
+  // 1. Đọc dữ liệu (1000 - 2000)
+  int valLY = processJoystick(PIN_LEFT_Y, centerLY); // Throttle
+  int valLX = processJoystick(PIN_LEFT_X, centerLX); // Yaw
+  int valRY = processJoystick(PIN_RIGHT_Y, centerRY); // Pitch
+  int valRX = processJoystick(PIN_RIGHT_X, centerRX); // Roll
 
-  // 2. GỬI LORA
-  data.throttle = (raw_Thro - 1000) / 4;
-  data.yaw      = (raw_Yaw - 1000) / 4;
-  data.pitch    = (raw_Pit - 1000) / 4;
-  data.roll     = (raw_Rol - 1000) / 4;
+  // 2. Map dữ liệu sang tọa độ Y trên màn hình
+  // Giá trị 1000-2000 sẽ dao động +/- 20 pixel quanh trục nền
+  // Lưu ý: Màn hình Y càng lớn càng đi xuống, nên phải đảo ngược map
+  int yLY = map(valLY, 1000, 2000, basePathLY + 20, basePathLY - 20);
+  int yLX = map(valLX, 1000, 2000, basePathLX + 20, basePathLX - 20);
+  int yRY = map(valRY, 1000, 2000, basePathRY + 20, basePathRY - 20);
+  int yRX = map(valRX, 1000, 2000, basePathRX + 20, basePathRX - 20);
 
-  LoRa.beginPacket();
-  LoRa.write(data.throttle);
-  LoRa.write(data.yaw);
-  LoRa.write(data.pitch);
-  LoRa.write(data.roll);
-  LoRa.endPacket();
-
-  // 3. HIỂN THỊ (Cập nhật số liệu)
-  // Xóa vùng số cũ bằng cách in đè màu đen hoặc vẽ hình chữ nhật
-  // Ở đây dùng cách vẽ hình chữ nhật đen để xóa vùng text
-  tft.fillRect(40, 30, 100, 60, ST77XX_BLACK); 
+  // 3. Vẽ dạng sóng cuốn chiếu (Rolling Scan)
   
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(5, 30); tft.print("THR: "); tft.print(raw_Thro);
-  tft.setCursor(5, 45); tft.print("YAW: "); tft.print(raw_Yaw);
-  tft.setCursor(5, 60); tft.print("PIT: "); tft.print(raw_Pit);
-  tft.setCursor(5, 75); tft.print("ROL: "); tft.print(raw_Rol);
+  // Tìm điểm X phía trước để xóa (Eraser bar)
+  int nextX = scanX + 1;
+  if (nextX >= screenW) nextX = 0;
 
-  // Nháy đèn báo TX
-  static bool led = false; led = !led;
-  tft.fillCircle(150, 10, 4, led ? ST77XX_RED : ST77XX_BLACK);
-
-  // 4. NHIỆT ĐỘ
-  static unsigned long timer = 0;
-  if (millis() - timer > 1000) {
-     float temp = bmp.readTemperature();
-     tft.fillRect(0, 100, 160, 20, ST77XX_BLACK);
-     tft.setCursor(5, 105);
-     tft.setTextColor(ST77XX_ORANGE);
-     tft.print("Temp: "); tft.print(temp); tft.print(" C");
-     timer = millis();
+  // Xóa cột dữ liệu cũ phía trước con trỏ (Vẽ đường đen dọc)
+  tft.drawFastVLine(nextX, 0, screenH, TFT_BLACK);
+  // Vẽ lại các đường phân cách bị xóa
+  if(nextX % 5 == 0) { // Chỉ vẽ lại dải phân cách để đỡ lag
+      tft.drawFastHLine(nextX, screenH/4, 1, TFT_DARKGREY);
+      tft.drawFastHLine(nextX, screenH*2/4, 1, TFT_DARKGREY);
+      tft.drawFastHLine(nextX, screenH*3/4, 1, TFT_DARKGREY);
   }
-  
-  delay(50);
+
+  // Tìm điểm X phía sau để nối dây
+  int prevX = scanX - 1;
+  if (prevX < 0) prevX = screenW - 1;
+
+  // Vẽ đường nối từ điểm cũ đến điểm mới
+  tft.drawLine(prevX, historyLY[prevX], scanX, yLY, TFT_BLUE);   // Throttle
+  tft.drawLine(prevX, historyLX[prevX], scanX, yLX, TFT_CYAN);   // Yaw
+  tft.drawLine(prevX, historyRY[prevX], scanX, yRY, TFT_GREEN);  // Pitch
+  tft.drawLine(prevX, historyRX[prevX], scanX, yRX, TFT_RED);    // Roll
+
+  // Cập nhật lịch sử
+  historyLY[scanX] = yLY;
+  historyLX[scanX] = yLX;
+  historyRY[scanX] = yRY;
+  historyRX[scanX] = yRX;
+
+  // Di chuyển con trỏ, nếu kịch màn hình thì quay về 0
+  scanX++;
+  if (scanX >= screenW) scanX = 0;
+
+  // Không cần delay(20) ở đây vì việc vẽ tốn thời gian rồi, nó sẽ tự chậm lại vừa đủ
+}
+
+// --- CÁC HÀM XỬ LÝ (GIỮ NGUYÊN KHÔNG ĐỔI) ---
+int readRawAverage(int pin) {
+  long sum = 0;
+  for(int i = 0; i < SAMPLE_COUNT; i++) sum += analogRead(pin);
+  return sum / SAMPLE_COUNT;
+}
+
+int processJoystick(int pin, int centerVal) {
+  int raw = readRawAverage(pin);
+  int diff = raw - centerVal;
+  if (abs(diff) < DEADZONE) raw = centerVal;
+  long mapVal;
+  if (raw < centerVal) mapVal = map(raw, 0, centerVal, 1000, 1500);
+  else mapVal = map(raw, centerVal, 4095, 1500, 2000);
+  return constrain(mapVal, 1000, 2000);
 }
