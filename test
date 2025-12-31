@@ -1,0 +1,157 @@
+#include <SPI.h>
+#include <LoRa.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+
+// --- 1. CẤU HÌNH CHÂN (Rõ ràng từng chân một) ---
+// LORA
+#define LORA_SS    5
+#define LORA_RST   14
+#define LORA_DIO0  2
+
+// MÀN HÌNH TFT
+#define TFT_CS     15
+#define TFT_RST    4
+#define TFT_DC     16
+
+// JOYSTICK
+#define L_YAW      32
+#define L_THROTTLE 33
+#define R_ROLL     35
+#define R_PITCH    34
+
+// --- 2. KHỞI TẠO ĐỐI TƯỢNG ---
+// Dùng thư viện Adafruit để kiểm soát chân tốt hơn
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_BMP280 bmp;
+
+// Biến gửi dữ liệu
+struct Data_Package {
+  byte throttle;
+  byte yaw;
+  byte pitch;
+  byte roll;
+};
+Data_Package data;
+
+void setup() {
+  Serial.begin(115200);
+
+  // --- BƯỚC 1: XỬ LÝ CHÂN CS ĐỂ TRÁNH XUNG ĐỘT ---
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH); // Tắt màn hình
+  pinMode(LORA_SS, OUTPUT);
+  digitalWrite(LORA_SS, HIGH); // Tắt LoRa
+
+  // --- BƯỚC 2: KHỞI ĐỘNG LORA TRƯỚC ---
+  Serial.print("Khoi dong LoRa... ");
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  
+  if (!LoRa.begin(433E6)) {
+    Serial.println("LOI!");
+    // Nếu lỗi LoRa, ta vẫn cho chạy tiếp để hiển thị lỗi lên màn hình
+  } else {
+    Serial.println("OK!");
+    LoRa.setSpreadingFactor(7);
+    LoRa.setSignalBandwidth(250E3);
+  }
+
+  // --- BƯỚC 3: KHỞI ĐỘNG MÀN HÌNH ---
+  // QUAN TRỌNG: Nếu màn hình trắng xóa, đổi BLACKTAB thành GREENTAB hoặc 144GREENTAB
+  tft.initR(INITR_BLACKTAB); 
+  // tft.initR(INITR_144GREENTAB); // Thử dòng này nếu bị trắng màn
+  
+  tft.setRotation(1);
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // Hiển thị trạng thái khởi động
+  tft.setCursor(0, 0);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.println("SYSTEM CHECK:");
+  
+  tft.print("LoRa: ");
+  // Kiểm tra lại LoRa lần nữa (mẹo check thanh ghi)
+  if (LoRa.begin(433E6)) { // Thử init lại nhẹ nhàng
+      tft.setTextColor(ST77XX_GREEN);
+      tft.println("OK");
+      LoRa.setSpreadingFactor(7); // Cài lại thông số sau khi init
+      LoRa.setSignalBandwidth(250E3);
+  } else {
+      tft.setTextColor(ST77XX_RED);
+      tft.println("ERROR");
+  }
+
+  // --- BƯỚC 4: KHỞI ĐỘNG BMP280 ---
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print("Sensor: ");
+  if (!bmp.begin(0x76)) {
+    tft.setTextColor(ST77XX_RED);
+    tft.println("NO");
+  } else {
+    tft.setTextColor(ST77XX_GREEN);
+    tft.println("OK");
+    // Cấu hình sensor
+    bmp.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2, Adafruit_BMP280::SAMPLING_X16, Adafruit_BMP280::FILTER_X16, Adafruit_BMP280::STANDBY_MS_500);
+  }
+  
+  delay(1000);
+  tft.fillScreen(ST77XX_BLACK); // Vào màn hình chính
+  
+  // Vẽ khung giao diện cố định
+  tft.drawRect(0, 0, 160, 128, ST77XX_BLUE);
+  tft.drawLine(0, 20, 160, 20, ST77XX_BLUE);
+  tft.setCursor(40, 6);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.print("TX CONTROLLER");
+}
+
+void loop() {
+  // 1. ĐỌC JOYSTICK
+  int raw_Thro = map(analogRead(L_THROTTLE), 0, 4095, 1000, 2000);
+  int raw_Yaw  = map(analogRead(L_YAW),      0, 4095, 1000, 2000);
+  int raw_Pit  = map(analogRead(R_PITCH),    0, 4095, 1000, 2000);
+  int raw_Rol  = map(analogRead(R_ROLL),     0, 4095, 1000, 2000);
+
+  // 2. GỬI LORA
+  data.throttle = (raw_Thro - 1000) / 4;
+  data.yaw      = (raw_Yaw - 1000) / 4;
+  data.pitch    = (raw_Pit - 1000) / 4;
+  data.roll     = (raw_Rol - 1000) / 4;
+
+  LoRa.beginPacket();
+  LoRa.write(data.throttle);
+  LoRa.write(data.yaw);
+  LoRa.write(data.pitch);
+  LoRa.write(data.roll);
+  LoRa.endPacket();
+
+  // 3. HIỂN THỊ (Cập nhật số liệu)
+  // Xóa vùng số cũ bằng cách in đè màu đen hoặc vẽ hình chữ nhật
+  // Ở đây dùng cách vẽ hình chữ nhật đen để xóa vùng text
+  tft.fillRect(40, 30, 100, 60, ST77XX_BLACK); 
+  
+  tft.setTextColor(ST77XX_CYAN);
+  tft.setCursor(5, 30); tft.print("THR: "); tft.print(raw_Thro);
+  tft.setCursor(5, 45); tft.print("YAW: "); tft.print(raw_Yaw);
+  tft.setCursor(5, 60); tft.print("PIT: "); tft.print(raw_Pit);
+  tft.setCursor(5, 75); tft.print("ROL: "); tft.print(raw_Rol);
+
+  // Nháy đèn báo TX
+  static bool led = false; led = !led;
+  tft.fillCircle(150, 10, 4, led ? ST77XX_RED : ST77XX_BLACK);
+
+  // 4. NHIỆT ĐỘ
+  static unsigned long timer = 0;
+  if (millis() - timer > 1000) {
+     float temp = bmp.readTemperature();
+     tft.fillRect(0, 100, 160, 20, ST77XX_BLACK);
+     tft.setCursor(5, 105);
+     tft.setTextColor(ST77XX_ORANGE);
+     tft.print("Temp: "); tft.print(temp); tft.print(" C");
+     timer = millis();
+  }
+  
+  delay(50);
+}
